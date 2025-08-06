@@ -1,0 +1,41 @@
+# SuperAgentCoder Pro - Neural Code Processor Dependencies
+# Production-ready AI code intelligence system requirements
+
+# Core ML/AI frameworks
+torch>=2.0.0
+transformers>=4.21.0
+numpy>=1.24.0
+
+# Optional high-performance dependencies (recommended)
+# Uncomment if available for better performance:
+# tree-sitter>=0.20.0  # For advanced AST parsing
+# scikit-learn>=1.3.0  # For additional ML utilities
+# faiss-cpu>=1.7.4     # For fast similarity search
+
+# Development and testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-benchmark>=4.0.0
+
+# Code quality and linting
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
+
+# Documentation (optional)
+# sphinx>=5.0.0
+# sphinx-rtd-theme>=1.2.0
+
+# Performance monitoring
+psutil>=5.9.0
+memory-profiler>=0.61.0
+
+# Async support
+aiofiles>=23.0.0
+
+# Data serialization
+orjson>=3.8.0
+
+# Progress bars and CLI utilities
+tqdm>=4.65.0
+click>=8.1.0
