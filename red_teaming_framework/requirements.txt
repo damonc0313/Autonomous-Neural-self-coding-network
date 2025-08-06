@@ -1,0 +1,17 @@
+openai>=1.0.0
+asyncio
+jsonschema>=4.0.0
+jupyter>=1.0.0
+notebook>=6.0.0
+python-dotenv>=1.0.0
+pandas>=1.5.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+numpy>=1.21.0
+pathlib
+argparse
+logging
+datetime
+hashlib
+dataclasses
+typing-extensions>=4.0.0
