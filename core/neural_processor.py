@@ -3,29 +3,26 @@ Neural Code Evolution Engine – Phase-1 Neural Processor
 ======================================================
 Module: core.neural_processor
 Dependencies: numpy (>=1.23), typing, asyncio, dataclasses, pathlib, ast, re, time, logging, argparse, math
-Colab-Ready: Auto-installs NumPy if missing, CLI works via `!python -m core.neural_processor`
-Performance: <50 ms processing for ≤10 K LOC (typical modern CPU)
+Colab-Ready: Auto-installs NumPy if missing (quietly) so the module runs out-of-the-box in Google Colab.
+Performance: <50 ms processing for ≤10 K LOC on a modern CPU
+
 Usage:
     $ python -m core.neural_processor --file path/to/file.py
-    # or import and use asynchronously
-    from core.neural_processor import NeuralProcessor, Config
+
+    # Programmatic
     import asyncio, pathlib
+    from core.neural_processor import NeuralProcessor
 
     processor = NeuralProcessor()
-    code_text = pathlib.Path(__file__).read_text()
-    embeddings = asyncio.run(processor.process_code(code_text, language="python"))
+    code = pathlib.Path(__file__).read_text()
+    embedding = asyncio.run(processor.process_code(code))
 
 This single-file implementation provides:
-* AST-aware tokenisation for Python and regex tokenisation for JS/TS/Java/C++.
-* A minimal Transformer encoder (2 layers, 4 heads) implemented in NumPy.
-* Asynchronous `process_code` returning a semantic embedding vector.
-* `benchmark_performance` helper verifying <50 ms processing on given files.
-* Basic unit tests (>90 % coverage of core paths) executed via `python -m core.neural_processor --run-tests`.
-* Integration hints for VS Code and other editors (see `__main__`).
-
-NOTE – To keep the engine lightweight (<2 GB) we avoid heavy ML frameworks. NumPy
-provides sufficient vectorised operations for our small-dimension encoder while
-still demonstrating transformer mechanics and sub-50 millisecond latency.
+* AST-aware tokenisation for Python and regex tokenisation for other languages.
+* A minimal 2-layer, 4-head Transformer encoder implemented in NumPy.
+* Async `process_code` API returning a semantic embedding vector.
+* `benchmark_performance` helper verifying latency goals.
+* Internal unit tests runnable via `--run-tests`.
 """
 
 from __future__ import annotations
@@ -42,61 +39,44 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
-# Google Colab readiness – ensure NumPy is present (most runtimes already have
-# it, but we install quietly if not). This keeps the single-file contract while
-# guaranteeing out-of-the-box execution in fresh Colab notebooks.
+# Google Colab readiness – ensure NumPy is available
 # ---------------------------------------------------------------------------
 try:
     import numpy as np  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover – install only when missing
-    import subprocess, sys, importlib
+except ModuleNotFoundError:  # pragma: no cover
+    import importlib, subprocess, sys
 
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "numpy>=1.23", "--quiet"]
-    )
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "numpy>=1.23", "--quiet"])
     np = importlib.import_module("numpy")  # type: ignore
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 ###############################################################################
-# Configuration dataclass
+# Configuration
 ###############################################################################
 
 
 @dataclass(slots=True)
 class Config:
-    """Runtime configuration for :class:`NeuralProcessor`."""
-
-    # Embedding / model hyper-parameters
-    model_dim: int = 256  # Smaller dim ensures <2 GB mem
+    model_dim: int = 256
     max_sequence_length: int = 2048
     ff_dim: int = 512
     num_layers: int = 2
-    num_heads: int = 4  # 256 / 4 = 64 dims per head
+    num_heads: int = 4
 
-    # Tokenisation
     vocab_size: int = 65_536  # hash-bucket vocabulary size
-    unknown_token_id: int = 1
-
-    # Performance settings
     performance_target_ms: int = 50
-
-    # Seed for reproducibility
     seed: int = 42
-
-    # Internal cache capacity (number of recent files)
     cache_size: int = 32
 
 
 ###############################################################################
-# Utility – simple LRU cache for embeddings
+# Tiny LRU cache for embeddings
 ###############################################################################
 
 
 class _LRUCache:
-    """A super-tiny LRU cache – maintains recent file embeddings."""
-
     def __init__(self, capacity: int):
         self.capacity = capacity
         self._store: Dict[str, np.ndarray] = {}
@@ -104,7 +84,6 @@ class _LRUCache:
 
     def get(self, key: str) -> Optional[np.ndarray]:
         if key in self._store:
-            # Move key to the end (most recently used)
             self._order.remove(key)
             self._order.append(key)
             return self._store[key]
@@ -121,59 +100,38 @@ class _LRUCache:
 
 
 ###############################################################################
-# Tokeniser – AST aware for Python, regex fall-back for others
+# Tokeniser – AST aware for Python, regex fallback otherwise
 ###############################################################################
 
 
 class Tokeniser:
-    """Language-aware tokeniser.
-
-    For Python we traverse the AST to capture identifier and node types which
-    provides better semantic signals than naïve lexical splitting. For other
-    languages we use a conservative regex that splits on word-boundaries and
-    common symbols. Each token is hashed into an integer bucket.
-    """
-
     _REGEX_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|==|!=|<=|>=|[{}()\[\].,;:+\-*/%<>]")
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-    # ---------------------------------------------------------------------
-    # Public helpers
-    # ---------------------------------------------------------------------
-
     def encode(self, code: str, language: str = "python") -> np.ndarray:
-        """Return a NumPy array of token IDs limited to *max_sequence_length*."""
-
-        tokens: List[str]
         if language.lower() == "python":
             tokens = self._python_ast_tokens(code)
         else:
-            tokens = self._regex_tokens(code)
+            tokens = self._REGEX_PATTERN.findall(code)
 
         token_ids = np.fromiter(
-            (self._hash_token(tok) for tok in tokens[: self.cfg.max_sequence_length]),
+            (self._hash_token(t) for t in tokens[: self.cfg.max_sequence_length]),
             dtype=np.int32,
             count=min(len(tokens), self.cfg.max_sequence_length),
         )
         return token_ids
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _python_ast_tokens(self, code: str) -> List[str]:
         try:
             tree = ast.parse(code)
         except SyntaxError:
-            return self._regex_tokens(code)
+            return self._REGEX_PATTERN.findall(code)
 
         tokens: List[str] = []
         for node in ast.walk(tree):
-            nodename = node.__class__.__name__
-            tokens.append(nodename)
-            # capture identifiers
+            tokens.append(node.__class__.__name__)
             if isinstance(node, ast.Name):
                 tokens.append(node.id)
             elif isinstance(node, ast.Attribute):
@@ -182,71 +140,37 @@ class Tokeniser:
                 tokens.append(node.name)
         return tokens
 
-    def _regex_tokens(self, code: str) -> List[str]:
-        return self._REGEX_PATTERN.findall(code)
-
     def _hash_token(self, token: str) -> int:
         return (hash(token) % (self.cfg.vocab_size - 2)) + 2  # reserve 0/1
 
 
 ###############################################################################
-# MiniTransformer – tiny but principled encoder in NumPy
+# Minimal NumPy Transformer encoder
 ###############################################################################
 
 
 class _MiniTransformer:
-    """A minimal transformer encoder stack implemented with NumPy.
-
-    This is **NOT** aimed at beating state-of-the-art language models. It provides
-    a principled demonstration of self-attention, positional encodings and
-    feed-forward layers sufficient for fast (<50 ms) semantic embedding
-    extraction on modest hardware while keeping the entire code in a single
-    file and without heavyweight dependencies.
-    """
-
     def __init__(self, cfg: Config):
         np.random.seed(cfg.seed)
         self.cfg = cfg
-
-        # Model weights – list of layer dicts
-        self.layers: List[Dict[str, np.ndarray]] = [
-            self._init_layer() for _ in range(cfg.num_layers)
-        ]
-        # Positional encodings (sinusoidal)
-        self.positional_encodings = self._init_positional_encodings()
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
+        self.layers = [self._init_layer() for _ in range(cfg.num_layers)]
+        self.positional = self._init_positionals()
 
     def __call__(self, token_ids: np.ndarray) -> np.ndarray:
-        # token_ids: (seq_len,)
-        seq_len = token_ids.shape[0]
-        d_model = self.cfg.model_dim
-
-        # Embedding look-up via hashing to fixed vectors
-        embeddings = self._token_embedding(token_ids)
-        embeddings += self.positional_encodings[:seq_len]
-
-        x = embeddings  # shape (seq_len, d_model)
+        x = self._token_embedding(token_ids) + self.positional[: token_ids.shape[0]]
         for layer in self.layers:
             x = self._encoder_block(x, layer)
-
-        # Mean-pooling over sequence to obtain a single semantic vector
-        return x.mean(axis=0)  # shape (d_model,)
+        return x.mean(axis=0)  # pooled embedding
 
     # ------------------------------------------------------------------
-    # Layer initialisation helpers
+    # Weights & helpers
     # ------------------------------------------------------------------
 
     def _init_layer(self) -> Dict[str, np.ndarray]:
         d_model = self.cfg.model_dim
         d_ff = self.cfg.ff_dim
-        num_heads = self.cfg.num_heads
-        head_dim = d_model // num_heads
         scale = 1 / math.sqrt(d_model)
-
-        layer = {
+        return {
             "W_q": np.random.normal(scale=scale, size=(d_model, d_model)),
             "W_k": np.random.normal(scale=scale, size=(d_model, d_model)),
             "W_v": np.random.normal(scale=scale, size=(d_model, d_model)),
@@ -256,66 +180,48 @@ class _MiniTransformer:
             "b1": np.zeros(d_ff),
             "b2": np.zeros(d_model),
         }
-        return layer
 
-    def _init_positional_encodings(self) -> np.ndarray:
+    def _init_positionals(self) -> np.ndarray:
         d_model = self.cfg.model_dim
-        positions = np.arange(self.cfg.max_sequence_length)[:, None]
-        div_term = np.exp(
-            np.arange(0, d_model, 2) * -(math.log(10000.0) / d_model)
-        )
+        pos = np.arange(self.cfg.max_sequence_length)[:, None]
+        div = np.exp(np.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
         pe = np.zeros((self.cfg.max_sequence_length, d_model))
-        pe[:, 0::2] = np.sin(positions * div_term)
-        pe[:, 1::2] = np.cos(positions * div_term)
+        pe[:, 0::2] = np.sin(pos * div)
+        pe[:, 1::2] = np.cos(pos * div)
         return pe
 
     # ------------------------------------------------------------------
-    # Core transformer operations
+    # Encoder block
     # ------------------------------------------------------------------
 
     def _token_embedding(self, token_ids: np.ndarray) -> np.ndarray:
-        # Simple random projection (deterministic due to seed)
         rng = np.random.default_rng(self.cfg.seed)
-        embedding_matrix = rng.normal(
-            loc=0.0, scale=1.0 / math.sqrt(self.cfg.model_dim), size=(self.cfg.vocab_size, self.cfg.model_dim)
-        )
-        return embedding_matrix[token_ids]
+        embed_mat = rng.normal(0.0, 1.0 / math.sqrt(self.cfg.model_dim), size=(self.cfg.vocab_size, self.cfg.model_dim))
+        return embed_mat[token_ids]
 
     def _encoder_block(self, x: np.ndarray, layer: Dict[str, np.ndarray]) -> np.ndarray:
-        # Multi-head self-attention + residual + layer norm (simplified)
-        attn_output = self._multi_head_attention(x, layer)
-        x = self._layer_norm(x + attn_output)
-
-        # Feed-forward network + residual + layer norm
-        ff_output = self._feed_forward(x, layer)
-        x = self._layer_norm(x + ff_output)
-        return x
+        attn_out = self._multi_head_attention(x, layer)
+        x = self._layer_norm(x + attn_out)
+        ff_out = self._feed_forward(x, layer)
+        return self._layer_norm(x + ff_out)
 
     def _multi_head_attention(self, x: np.ndarray, layer: Dict[str, np.ndarray]) -> np.ndarray:
-        # x shape: (seq_len, d_model)
-        Q = x @ layer["W_q"]
-        K = x @ layer["W_k"]
-        V = x @ layer["W_v"]
-
-        num_heads = self.cfg.num_heads
-        head_dim = self.cfg.model_dim // num_heads
-
-        def split_heads(t: np.ndarray) -> np.ndarray:
-            # (seq_len, num_heads, head_dim)
-            return t.reshape(t.shape[0], num_heads, head_dim)
-
-        Q_h, K_h, V_h = map(split_heads, (Q, K, V))
-        scores = (Q_h @ K_h.transpose(0, 2, 1)) / math.sqrt(head_dim)  # (seq_len, num_heads, seq_len)
+        h = self.cfg.num_heads
+        d = self.cfg.model_dim // h
+        Q, K, V = x @ layer["W_q"], x @ layer["W_k"], x @ layer["W_v"]
+        def split(t: np.ndarray):
+            return t.reshape(t.shape[0], h, d)
+        Qh, Kh, Vh = map(split, (Q, K, V))
+        scores = (Qh @ Kh.transpose(0, 2, 1)) / math.sqrt(d)
         attn = self._softmax(scores)
-        context = attn @ V_h  # (seq_len, num_heads, head_dim)
-        context = context.reshape(x.shape[0], self.cfg.model_dim)
-        return context @ layer["W_o"]
+        ctx = (attn @ Vh).reshape(x.shape[0], self.cfg.model_dim)
+        return ctx @ layer["W_o"]
 
     def _feed_forward(self, x: np.ndarray, layer: Dict[str, np.ndarray]) -> np.ndarray:
         return self._relu(x @ layer["W1"] + layer["b1"]) @ layer["W2"] + layer["b2"]
 
     # ------------------------------------------------------------------
-    # Activation / normalisation helpers
+    # Utils
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -329,9 +235,9 @@ class _MiniTransformer:
 
     @staticmethod
     def _layer_norm(x: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-        mean = x.mean(axis=-1, keepdims=True)
+        mu = x.mean(axis=-1, keepdims=True)
         var = x.var(axis=-1, keepdims=True)
-        return (x - mean) / np.sqrt(var + eps)
+        return (x - mu) / np.sqrt(var + eps)
 
 
 ###############################################################################
@@ -340,151 +246,91 @@ class _MiniTransformer:
 
 
 class NeuralProcessor:
-    """High-level processor that tokenises source code and extracts embeddings."""
-
     def __init__(self, config: Optional[Config] = None):
-        self.config = config or Config()
-        self.tokeniser = Tokeniser(self.config)
-        self.encoder = _MiniTransformer(self.config)
-        self._cache = _LRUCache(self.config.cache_size)
-
-    # ------------------------------------------------------------------
-    # Public coroutine
-    # ------------------------------------------------------------------
+        self.cfg = config or Config()
+        self.tokeniser = Tokeniser(self.cfg)
+        self.encoder = _MiniTransformer(self.cfg)
+        self.cache = _LRUCache(self.cfg.cache_size)
 
     async def process_code(self, code: str, *, language: str = "python", cache_key: Optional[str] = None) -> np.ndarray:
-        """Return semantic embedding for *code*.
-
-        Args:
-            code: Source code string.
-            language: One of `python`, `javascript`, `typescript`, `java`, `cpp`.
-            cache_key: Optional string key to cache results (e.g. file path).
-        """
-        if cache_key:
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                logger.debug("Cache hit for %s", cache_key)
-                return cached
-
-        start_time = time.perf_counter()
+        if cache_key and (cached := self.cache.get(cache_key)) is not None:
+            return cached
+        t0 = time.perf_counter()
         token_ids = self.tokeniser.encode(code, language)
         embedding = self.encoder(token_ids)
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
-
-        if elapsed_ms > self.config.performance_target_ms:
-            logger.warning(
-                "Processing took %.1f ms which exceeds target of %d ms",
-                elapsed_ms,
-                self.config.performance_target_ms,
-            )
-        else:
-            logger.debug("Processed in %.1f ms", elapsed_ms)
-
+        elapsed = (time.perf_counter() - t0) * 1000
+        if elapsed > self.cfg.performance_target_ms:
+            logger.warning("Processing took %.1f ms (target %d ms)", elapsed, self.cfg.performance_target_ms)
         if cache_key:
-            self._cache.set(cache_key, embedding)
+            self.cache.set(cache_key, embedding)
         return embedding
 
-    # ------------------------------------------------------------------
-    # Benchmark helper
-    # ------------------------------------------------------------------
-
     def benchmark_performance(self, file_path: Path, language: str = "python") -> Dict[str, float]:
-        """Benchmark processing speed for *file_path* and return results."""
         code = file_path.read_text(encoding="utf-8")
-        start = time.perf_counter()
-        embedding = asyncio.run(self.process_code(code, language=language))
-        total_ms = (time.perf_counter() - start) * 1000
-        logger.info("%s – %d tokens → %.2f ms", file_path.name, len(code.splitlines()), total_ms)
-        return {
-            "file": str(file_path),
-            "lines": len(code.splitlines()),
-            "elapsed_ms": total_ms,
-            "embedding_dim": embedding.shape[0],
-        }
+        t0 = time.perf_counter()
+        emb = asyncio.run(self.process_code(code, language=language))
+        ms = (time.perf_counter() - t0) * 1000
+        logger.info("%s – %d lines → %.2f ms", file_path.name, len(code.splitlines()), ms)
+        return {"file": str(file_path), "lines": len(code.splitlines()), "elapsed_ms": ms, "embedding_dim": emb.shape[0]}
 
 
 ###############################################################################
-# Mini test-suite – executed with "--run-tests"
+# Internal test-suite – run with --run-tests
 ###############################################################################
 
 
-def _run_unit_tests() -> None:
-    """Lightweight self-contained tests (no external frameworks)."""
-
-    processor = NeuralProcessor()
-
-    # Test 1 – basic embedding shape
+def _run_tests() -> None:
+    proc = NeuralProcessor()
     sample = """def add(a, b):\n    return a + b\n"""
-    emb = asyncio.run(processor.process_code(sample))
-    assert emb.shape == (processor.config.model_dim,), "Invalid embedding shape"
-
-    # Test 2 – caching works
-    emb_cached = asyncio.run(processor.process_code(sample, cache_key="sample"))
-    emb_cached2 = asyncio.run(processor.process_code(sample, cache_key="sample"))
-    assert np.allclose(emb_cached, emb_cached2), "Cache mismatch"
-
-    # Test 3 – performance benchmark within target for small file
-    bench = processor.benchmark_performance(Path(__file__))
-    assert bench["elapsed_ms"] <= 100, "Benchmark too slow on self-file"
-
-    print("All unit tests passed ✔️")
+    emb = asyncio.run(proc.process_code(sample))
+    assert emb.shape == (proc.cfg.model_dim,)
+    emb2 = asyncio.run(proc.process_code(sample, cache_key="x"))
+    emb3 = asyncio.run(proc.process_code(sample, cache_key="x"))
+    assert np.allclose(emb2, emb3)
+    bench = proc.benchmark_performance(Path(__file__))
+    assert bench["elapsed_ms"] <= 100
+    print("All tests passed ✔️")
 
 
 ###############################################################################
-# CLI interface – analyse files / run tests / benchmark repos
+# CLI
 ###############################################################################
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NeuralProcessor CLI")
-    parser.add_argument("--file", type=str, help="Path to source file to analyse")
-    parser.add_argument("--language", type=str, default="python", help="Source language")
-    parser.add_argument("--benchmark", action="store_true", help="Benchmark processing time")
-    parser.add_argument("--run-tests", action="store_true", help="Run internal unit tests")
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description="NeuralProcessor CLI")
+    p.add_argument("--file", type=str, help="Path to source file to analyse")
+    p.add_argument("--language", type=str, default="python")
+    p.add_argument("--benchmark", action="store_true")
+    p.add_argument("--run-tests", action="store_true")
+    return p.parse_args()
 
 
-###############################################################################
-# VS Code / Editor integration tip (displayed on CLI if no args)
-###############################################################################
-###############################################################################
-
-
-_EDITOR_HELP = """
-Integration Tip – VS Code
-------------------------
-1. Install the *Python* extension.
-2. Add a *Task* that executes:  `python -m core.neural_processor --file ${file}`
-3. Bind the task to a keyboard shortcut for instant embedding generation or
-   benchmarking whenever you save a file.
-"""
+_EDITOR_HELP = (
+    "Integration Tip – VS Code\n"
+    "------------------------\n"
+    "Add a task that runs: `python -m core.neural_processor --file ${file}` and bind it to a shortcut."
+)
 
 
 if __name__ == "__main__":
     args = _parse_args()
-
     if args.run_tests:
-        _run_unit_tests()
-        raise SystemExit(0)
-
-    if not args.file:
-        print(_EDITOR_HELP)
-        raise SystemExit(0)
-
-    src_path = Path(args.file).expanduser().resolve()
-    if not src_path.exists():
-        raise SystemExit(f"File not found: {src_path}")
-
-    processor = NeuralProcessor()
-
-    if args.benchmark:
-        benchmark = processor.benchmark_performance(src_path, language=args.language)
-        print(
-            f"Embedding dim: {benchmark['embedding_dim']} | "
-            f"Lines: {benchmark['lines']} | "
-            f"Elapsed: {benchmark['elapsed_ms']:.2f} ms"
-        )
+        _run_tests()
+    elif args.file:
+        src = Path(args.file).expanduser().resolve()
+        if not src.exists():
+            raise SystemExit(f"File not found: {src}")
+        proc = NeuralProcessor()
+        if args.benchmark:
+            stats = proc.benchmark_performance(src, language=args.language)
+            print(
+                f"Embedding dim: {stats['embedding_dim']} | Lines: {stats['lines']} | "
+                f"Elapsed: {stats['elapsed_ms']:.2f} ms"
+            )
+        else:
+            text = src.read_text(encoding="utf-8")
+            emb = asyncio.run(proc.process_code(text, language=args.language, cache_key=str(src)))
+            print("Embedding (first 10 dims):", np.round(emb[:10], 3))
     else:
-        code_text = src_path.read_text(encoding="utf-8")
-        embedding = asyncio.run(processor.process_code(code_text, language=args.language, cache_key=str(src_path)))
-        print("Embedding (first 10 dims):", np.round(embedding[:10], 3))
+        print(_EDITOR_HELP)
