@@ -3,6 +3,7 @@ Neural Code Evolution Engine – Phase-1 Neural Processor
 ======================================================
 Module: core.neural_processor
 Dependencies: numpy (>=1.23), typing, asyncio, dataclasses, pathlib, ast, re, time, logging, argparse, math
+Colab-Ready: Auto-installs NumPy if missing, CLI works via `!python -m core.neural_processor`
 Performance: <50 ms processing for ≤10 K LOC (typical modern CPU)
 Usage:
     $ python -m core.neural_processor --file path/to/file.py
@@ -36,11 +37,24 @@ import logging
 import math
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional
 
-import numpy as np  # External dependency explicitly declared above
+# ---------------------------------------------------------------------------
+# Google Colab readiness – ensure NumPy is present (most runtimes already have
+# it, but we install quietly if not). This keeps the single-file contract while
+# guaranteeing out-of-the-box execution in fresh Colab notebooks.
+# ---------------------------------------------------------------------------
+try:
+    import numpy as np  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover – install only when missing
+    import subprocess, sys, importlib
+
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "numpy>=1.23", "--quiet"]
+    )
+    np = importlib.import_module("numpy")  # type: ignore
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
