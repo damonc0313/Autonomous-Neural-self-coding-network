@@ -1,0 +1,38 @@
+{
+  "total_episodes": 5,
+  "total_reward": -32.25,
+  "average_reward": -6.45,
+  "training_history": [
+    {
+      "episode": 1,
+      "reward": -6.45,
+      "success": false,
+      "avg_reward": -6.45
+    },
+    {
+      "episode": 2,
+      "reward": -6.45,
+      "success": false,
+      "avg_reward": -6.45
+    },
+    {
+      "episode": 3,
+      "reward": -6.45,
+      "success": false,
+      "avg_reward": -6.45
+    },
+    {
+      "episode": 4,
+      "reward": -6.45,
+      "success": false,
+      "avg_reward": -6.45
+    },
+    {
+      "episode": 5,
+      "reward": -6.45,
+      "success": false,
+      "avg_reward": -6.45
+    }
+  ],
+  "final_success_rate": 0.0
+}
