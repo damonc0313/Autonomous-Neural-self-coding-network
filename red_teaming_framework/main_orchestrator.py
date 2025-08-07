@@ -16,8 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-# Add the tools directory to the path
-sys.path.append(str(Path(__file__).parent / "tools"))
+# Ensure the red_teaming_framework package root is on sys.path so that
+# submodules such as `tools.*` can be imported as proper packages. This
+# works even if the user executes this script from another working
+# directory.
+PACKAGE_ROOT = Path(__file__).resolve().parent
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
 
 from tools.model_interface import GPTOSSInterface
 from tools.findings_schema import FindingsManager
